@@ -2,8 +2,8 @@ name: Morning Earnings Report
 
 on:
   schedule:
-    # JST 火-土 8:00 = UTC 月-金 23:00 (JST = UTC+9)
-    - cron: '0 23 * * 1-5'
+    # JST 火-土 7:00 = UTC 月-金 23:00 (JST = UTC+9)
+    - cron: '0 22 * * 1-5'
   workflow_dispatch:  # 手動トリガーを許可
 
 jobs:
