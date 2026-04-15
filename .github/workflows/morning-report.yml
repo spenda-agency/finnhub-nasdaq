@@ -6,6 +6,11 @@ on:
     - cron: '0 22 * * 1-5'
   workflow_dispatch:  # 手動トリガーを許可
 
+# Node.js 20 deprecation warning を回避するため Node.js 24 に opt-in
+# （2026年6月以降は GitHub 側で自動切替される）
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   morning-report:
     runs-on: ubuntu-latest
