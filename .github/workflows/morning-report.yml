@@ -1,0 +1,50 @@
+name: Morning Earnings Report
+
+on:
+  schedule:
+    # JST 火-土 8:00 = UTC 月-金 23:00 (JST = UTC+9)
+    - cron: '0 23 * * 1-5'
+  workflow_dispatch:  # 手動トリガーを許可
+
+jobs:
+  morning-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Japanese fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk fonts-ipafont-gothic
+          # matplotlib のフォントキャッシュをクリア（新規フォント認識のため）
+          rm -rf ~/.cache/matplotlib
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run morning report
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          PYTHONIOENCODING: utf-8
+        run: python morning_report.py
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: morning-report-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7

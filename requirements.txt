@@ -1,0 +1,7 @@
+finnhub-python>=2.4.20
+matplotlib>=3.8.0
+slack-sdk>=3.26.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+yfinance>=0.2.40
+
