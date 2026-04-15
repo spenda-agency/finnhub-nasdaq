@@ -94,9 +94,11 @@ Finnhub `/calendar/earnings` から、`Revenue Consensus > $10B` かつ未発表
 🇺🇸 CRM    | EPS予想 $2.10 | Rev予想  $9.7B (前期 $9.3B)  | MCap $260B  | FY25Q4 02-26 amc
 ```
 
-### セクション2: 直近24時間の決算 → Part 1 / Part 2 自動生成
-前営業日 amc 〜 当日 bmo に発表された `Revenue Actual > $10B` の銘柄について、
-Part 1 + Part 2 をスレッドで投稿。
+### セクション2: 直近24時間の決算 → Part 1 / Part 2 + X下書き + コラム記事 自動生成
+前営業日 amc 〜 当日 bmo に発表された `Revenue Actual > $10B` の銘柄について：
+1. **Part 1 / Part 2** 画像を Slack スレッドに投稿
+2. **X投稿文 (140字以内)** を Claude API で生成 → WordPress に下書き保存（画像添付）
+3. **コラム記事 (2,000字前後)** を Claude API で生成 → Slack スレッドに長文投稿
 
 ### 手動実行
 ```powershell
@@ -115,11 +117,23 @@ python morning_report.py
 1. リポジトリを GitHub に push（下記「初回 push 手順」参照）
 2. GitHub の Settings → Secrets and variables → Actions で以下を登録:
 
-   | Secret 名 | 値 |
-   |---|---|
-   | `FINNHUB_API_KEY` | Finnhub のAPIキー |
-   | `SLACK_BOT_TOKEN` | `xoxb-...` |
-   | `SLACK_CHANNEL` | `C05QPTXN4HE` |
+   | Secret 名 | 値 | 必須 |
+   |---|---|---|
+   | `FINNHUB_API_KEY` | Finnhub のAPIキー | ✅ |
+   | `SLACK_BOT_TOKEN` | `xoxb-...` | ✅ |
+   | `SLACK_CHANNEL` | `C05QPTXN4HE` | ✅ |
+   | `ANTHROPIC_API_KEY` | `sk-ant-...` | ✅ (コラム/X生成用) |
+   | `WP_SITE_URL` | `https://fxstock-dataincome.com` | ✅ (X下書き保存用) |
+   | `WP_USERNAME` | WP のログイン名 | ✅ |
+   | `WP_APP_PASSWORD` | アプリケーションパスワード（スペース込み24文字） | ✅ |
+
+   **WordPress アプリケーションパスワードの取得手順:**
+   1. WordPress 管理画面にログイン (`https://fxstock-dataincome.com/wp-admin`)
+   2. 左メニュー「ユーザー」→「プロフィール」
+   3. 下部の「アプリケーションパスワード」セクション
+   4. 新しい名前（例: `finnhub-nasdaq`）を入れて「新しいアプリケーションパスワードを追加」
+   5. 表示された24文字（`xxxx xxxx xxxx xxxx xxxx xxxx` スペース込み）をコピー → Secret に設定
+   6. 閉じると二度と見られないので必ず保存
 
 3. Actions タブ → "Morning Earnings Report" → "Run workflow" で手動テスト
 

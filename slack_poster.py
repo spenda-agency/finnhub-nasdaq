@@ -50,8 +50,16 @@ def _resolve_channel_id(client: WebClient, channel: str) -> str:
 def _client_or_raise() -> tuple[WebClient, str]:
     token = os.getenv("SLACK_BOT_TOKEN")
     channel = os.getenv("SLACK_CHANNEL")
-    if not token or not channel:
-        raise RuntimeError("SLACK_BOT_TOKEN / SLACK_CHANNEL が .env に設定されていません")
+    missing = []
+    if not token:
+        missing.append("SLACK_BOT_TOKEN")
+    if not channel:
+        missing.append("SLACK_CHANNEL")
+    if missing:
+        raise RuntimeError(
+            f"環境変数 {', '.join(missing)} が未設定です。"
+            f"ローカル実行時は .env を、GitHub Actions実行時は Settings→Secrets を確認してください。"
+        )
     client = WebClient(token=token)
     channel_id = _resolve_channel_id(client, channel)
     return client, channel_id

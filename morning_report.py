@@ -155,16 +155,33 @@ def get_recent_reported_tickers() -> list[CalendarEntry]:
     return result
 
 
-def run_part1_part2_for(ticker: str, parent_thread_ts: str = "") -> None:
-    """個別銘柄に Part1+Part2 を生成して Slack投稿"""
+def run_part1_part2_for(entry: CalendarEntry, parent_thread_ts: str = "") -> None:
+    """個別銘柄に Part1+Part2 を生成して Slack投稿し、続けて X下書き & コラム投稿"""
+    ticker = entry.symbol
     name = fetch_company_name(ticker) or ticker
     log.info(f"[{ticker}] {name} - Part1/Part2 生成開始")
     try:
         process_ticker(ticker, name, post_slack=True, parts=[1, 2])
     except Exception as e:
-        log.error(f"[{ticker}] エラー: {e}")
+        log.error(f"[{ticker}] Part1/Part2 エラー: {e}")
         if parent_thread_ts:
-            post_text_to_slack(f":warning: {ticker} の生成失敗: `{e}`", thread_ts=parent_thread_ts)
+            post_text_to_slack(f":warning: {ticker} Part1/2 生成失敗: `{e}`", thread_ts=parent_thread_ts)
+        return
+
+    # 後処理: X下書き + コラム記事
+    try:
+        from publish_report import publish_for_ticker
+        publish_for_ticker(
+            ticker=ticker,
+            company_jp=name,
+            fy_label=entry.fiscal_label,
+            report_date=entry.date,
+            parent_thread_ts=parent_thread_ts,
+        )
+    except Exception as e:
+        log.exception(f"[{ticker}] publish エラー: {e}")
+        if parent_thread_ts:
+            post_text_to_slack(f":warning: {ticker} 後処理(WP/コラム)失敗: `{e}`", thread_ts=parent_thread_ts)
 
 
 # ---------- メイン ----------
@@ -202,7 +219,7 @@ def main() -> int:
     parent_ts = post_text_to_slack(summary)
 
     for entry in recent:
-        run_part1_part2_for(entry.symbol, parent_thread_ts=parent_ts)
+        run_part1_part2_for(entry, parent_thread_ts=parent_ts)
 
     log.info("morning_report 完了")
     return 0
