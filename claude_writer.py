@@ -119,3 +119,87 @@ def generate_column(facts: dict) -> str:
 上記データのみを使って、外部知識の創作なしでコラムを書いてください。
 タイトル行（H1）から始めて、各セクション見出し（H2）に沿って記述してください。"""
     return _call(COLUMN_SYSTEM, user, max_tokens=3000, temperature=0.6)
+
+
+# -----------------------------------------------------------------
+# まとめコラム記事生成（全銘柄を1記事にまとめる）
+# -----------------------------------------------------------------
+COMBINED_COLUMN_SYSTEM = """あなたは米国株の決算速報コラムを書くアナリストです。
+個人投資家が毎朝読むのを楽しみにする、データに基づいた冷静で読みやすい文章を書きます。
+
+文体ルール:
+- 日本語、丁寧語（です・ます）
+- 断定・推奨は避け、「〜と読み取れます」「〜の可能性があります」など客観的な表現
+- 数値は必ず出典データ範囲内の事実のみ使用。外部知識の創作禁止
+- 市場の見方・アナリスト予想は「そう言われている」形で引用
+
+構成ルール:
+- 冒頭に全体の概要（200〜300字）
+- 各銘柄ごとにH2見出しで区切り、以下のサブセクション（H3）を含める:
+  ### 決算ハイライト（数値中心）
+  ### 市場の受け止め（株価反応・アナリスト推奨）
+  ### 成長性と収益性（YoY・利益率トレンド）
+  ### 投資家目線のポイント（注目すべき論点）
+- 最後に全体のまとめ（200字前後）"""
+
+
+def generate_combined_column(facts_list: list[dict], upcoming_entries: list[dict] | None = None) -> str:
+    """複数銘柄の facts 辞書リストから、1つのまとめコラム記事を生成"""
+
+    # 各銘柄のデータブロックを組み立て
+    ticker_blocks = []
+    for facts in facts_list:
+        block = f"""### {facts['company']} (${facts['ticker']}) — {facts['fy_label']}
+- 発表日: {facts['report_date']}
+- 売上: {facts['revenue_actual_str']}（予想 {facts['revenue_estimate_str']}、サプライズ {facts['revenue_surprise_str']}）
+- EPS: {facts['eps_actual_str']}（予想 {facts['eps_estimate_str']}、サプライズ {facts['eps_surprise_str']}）
+- 売上YoY: {facts['yoy_str']}
+- 営業利益率: {facts['op_margin_str']} / 純利益率: {facts['net_margin_str']}
+- 現在株価: {facts['current_price_str']}（決算後反応: {facts['reaction_str']}）
+- 目標株価: 平均 {facts['target_mean_str']} / 高値 {facts['target_high_str']} / 安値 {facts['target_low_str']}
+- アナリスト推奨: Strong Buy {facts['strong_buy']} / Buy {facts['buy']} / Hold {facts['hold']} / Sell {facts['sell']} / Strong Sell {facts['strong_sell']}（計 {facts['total_analysts']}名）
+- 過去8四半期の売上推移:
+{facts['revenue_history_str']}"""
+        ticker_blocks.append(block)
+
+    tickers_data = "\n\n".join(ticker_blocks)
+
+    # 決算直前の銘柄セクション
+    upcoming_section = ""
+    if upcoming_entries:
+        upcoming_lines = []
+        for u in upcoming_entries:
+            upcoming_lines.append(
+                f"- {u['company']} (${u['ticker']}): {u['fy_label']} / "
+                f"EPS予想 {u.get('eps_estimate_str', 'N/A')} (前期 {u.get('prev_eps_str', 'N/A')}) / "
+                f"Rev予想 {u.get('revenue_estimate_str', 'N/A')} (前期 {u.get('prev_revenue_str', 'N/A')}) / "
+                f"時価総額 {u.get('market_cap_str', 'N/A')} / "
+                f"発表予定 {u.get('date', '')} {u.get('hour', '')}"
+            )
+        upcoming_section = f"""
+
+## 今後の決算予定データ（決算直前の詳細セクション用）
+{chr(10).join(upcoming_lines)}"""
+
+    user = f"""以下の決算データに基づき、まとめコラム記事をMarkdownで書いてください。
+タイトル行（H1）は不要です（別途設定します）。
+
+## 決算発表済み銘柄データ（決算直後結果セクション用）
+{tickers_data}
+{upcoming_section}
+
+ルール:
+- 上記データのみを使って、外部知識の創作なしで書いてください
+- 冒頭の概要で全銘柄の決算結果を簡潔に要約してください
+- 決算発表済みの各銘柄ごとにH2見出し（## 銘柄名）で区切り、H3サブセクションで詳細を書いてください
+- 今後の決算予定データがある場合は「## 決算直前の注目銘柄」というH2セクションを最後の方に追加し、各銘柄の注目ポイントをまとめてください
+- 最後に「## まとめ」セクションで全体の総括を書いてください
+- 各銘柄セクションは800〜1,200字、全体で最低2,000字以上"""
+
+    # 銘柄数に応じてトークン上限を調整
+    max_tokens = max(4000, len(facts_list) * 2000 + 1500)
+    if upcoming_entries:
+        max_tokens += len(upcoming_entries) * 800
+    max_tokens = min(max_tokens, 8000)  # Claude Haiku の安全上限
+
+    return _call(COMBINED_COLUMN_SYSTEM, user, max_tokens=max_tokens, temperature=0.6)

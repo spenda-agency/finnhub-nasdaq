@@ -156,7 +156,7 @@ def get_recent_reported_tickers() -> list[CalendarEntry]:
 
 
 def run_part1_part2_for(entry: CalendarEntry, parent_thread_ts: str = "") -> None:
-    """個別銘柄に Part1+Part2 を生成して Slack投稿し、続けて X下書き & コラム投稿"""
+    """個別銘柄に Part1+Part2 チャート画像を生成して Slack投稿（記事はまとめで別途生成）"""
     ticker = entry.symbol
     name = fetch_company_name(ticker) or ticker
     log.info(f"[{ticker}] {name} - Part1/Part2 生成開始")
@@ -166,22 +166,73 @@ def run_part1_part2_for(entry: CalendarEntry, parent_thread_ts: str = "") -> Non
         log.error(f"[{ticker}] Part1/Part2 エラー: {e}")
         if parent_thread_ts:
             post_text_to_slack(f":warning: {ticker} Part1/2 生成失敗: `{e}`", thread_ts=parent_thread_ts)
-        return
 
-    # 後処理: X下書き + コラム記事
+
+def _fmt_b_simple(v: float | None) -> str:
+    if v is None:
+        return "N/A"
+    if v >= 1e12:
+        return f"${v / 1e12:.2f}T"
+    if v >= 1e9:
+        return f"${v / 1e9:.1f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.0f}M"
+    return f"${v:.0f}"
+
+
+def _fmt_eps_simple(v: float | None) -> str:
+    return f"${v:.2f}" if v is not None else "N/A"
+
+
+def _build_upcoming_data() -> list[dict]:
+    """今後3日の決算予定データを、まとめ記事の「決算直前の詳細」セクション用に構築"""
+    today = date.today()
+    end = today + timedelta(days=3)
     try:
-        from publish_report import publish_for_ticker
-        publish_for_ticker(
-            ticker=ticker,
-            company_jp=name,
-            fy_label=entry.fiscal_label,
-            report_date=entry.date,
-            parent_thread_ts=parent_thread_ts,
-        )
+        entries = fetch_earnings_calendar(today.isoformat(), end.isoformat())
     except Exception as e:
-        log.exception(f"[{ticker}] publish エラー: {e}")
-        if parent_thread_ts:
-            post_text_to_slack(f":warning: {ticker} 後処理(WP/コラム)失敗: `{e}`", thread_ts=parent_thread_ts)
+        log.warning(f"今後の決算予定取得失敗: {e}")
+        return []
+
+    upcoming = [
+        e for e in entries
+        if e.revenue_estimate and e.revenue_estimate > REVENUE_THRESHOLD
+        and e.revenue_actual is None
+    ]
+    upcoming.sort(key=lambda e: (e.date, e.symbol))
+
+    result = []
+    for e in upcoming:
+        try:
+            eps_hist = fetch_eps_surprise(e.symbol, limit=1)
+            prev_eps = eps_hist[0].actual if eps_hist else None
+        except Exception:
+            prev_eps = None
+        try:
+            prev_rev = fetch_previous_quarter_revenue(e.symbol)
+        except Exception:
+            prev_rev = None
+        try:
+            mc = fetch_market_cap(e.symbol)
+        except Exception:
+            mc = None
+
+        name = fetch_company_name(e.symbol) or e.symbol
+        result.append({
+            "ticker": e.symbol,
+            "company": name,
+            "fy_label": e.fiscal_label,
+            "date": e.date,
+            "hour": e.hour or "?",
+            "eps_estimate_str": _fmt_eps_simple(e.eps_estimate),
+            "prev_eps_str": _fmt_eps_simple(prev_eps),
+            "revenue_estimate_str": _fmt_b_simple(e.revenue_estimate),
+            "prev_revenue_str": _fmt_b_simple(prev_rev),
+            "market_cap_str": _fmt_b_simple(mc),
+        })
+
+    log.info(f"決算直前データ構築: {len(result)}件")
+    return result
 
 
 # ---------- メイン ----------
@@ -218,8 +269,36 @@ def main() -> int:
     )
     parent_ts = post_text_to_slack(summary)
 
+    # Part 1 / Part 2 チャート画像は個別に生成・投稿
     for entry in recent:
         run_part1_part2_for(entry, parent_thread_ts=parent_ts)
+
+    # 全銘柄まとめ記事を1本生成 (WP下書き + Slackコラム)
+    try:
+        from publish_report import publish_combined_article
+        ticker_data_list = []
+        for entry in recent:
+            name = fetch_company_name(entry.symbol) or entry.symbol
+            ticker_data_list.append({
+                "ticker": entry.symbol,
+                "company_jp": name,
+                "fy_label": entry.fiscal_label,
+                "report_date": entry.date,
+            })
+
+        # 今後の決算予定を取得して「決算直前の詳細」セクション用データを構築
+        upcoming_entries_data = _build_upcoming_data()
+
+        publish_combined_article(
+            ticker_data_list=ticker_data_list,
+            report_date=date.today().isoformat(),
+            parent_thread_ts=parent_ts,
+            upcoming_entries=upcoming_entries_data,
+        )
+    except Exception as e:
+        log.exception(f"まとめ記事生成失敗: {e}")
+        if parent_ts:
+            post_text_to_slack(f":warning: まとめ記事生成失敗: `{e}`", thread_ts=parent_ts)
 
     log.info("morning_report 完了")
     return 0
