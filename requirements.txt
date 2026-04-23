@@ -4,5 +4,6 @@ slack-sdk>=3.26.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 yfinance>=0.2.40
+lxml>=5.0.0  # yfinance earnings_dates 取得に必要（無いとWarning頻発）
 anthropic>=0.40.0
 

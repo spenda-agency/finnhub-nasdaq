@@ -1,12 +1,25 @@
-"""Finnhub APIからのデータ取得"""
+"""Finnhub APIからのデータ取得
+
+プロセス内メモ化 + 429リトライを組み込み、同じティッカーへの重複呼び出し
+（Part1/Part2 → publish_combined_article の2巡）で無料枠（60req/min）を
+食いつぶさないようにしている。
+"""
+import logging
 import os
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import finnhub
 from dotenv import load_dotenv
 
 load_dotenv()
+log = logging.getLogger("finnhub_client")
+
+# 429 時のリトライ設定
+_MAX_RETRIES = 2
+_RETRY_SLEEP_SEC = 60  # 無料枠は 60 req/min のため 60秒スリープで回復
 
 
 @dataclass
@@ -68,10 +81,68 @@ def _client() -> finnhub.Client:
     return finnhub.Client(api_key=api_key)
 
 
+def _call_with_retry(func, *args, **kwargs):
+    """429 (rate limit) を受けたら _RETRY_SLEEP_SEC 秒待って最大 _MAX_RETRIES 回リトライ。"""
+    attempt = 0
+    while True:
+        try:
+            return func(*args, **kwargs)
+        except finnhub.FinnhubAPIException as e:
+            status = getattr(e, "status_code", None)
+            if status == 429 and attempt < _MAX_RETRIES:
+                attempt += 1
+                log.warning(
+                    f"Finnhub 429 (rate limit)。{_RETRY_SLEEP_SEC}秒待機してリトライ ({attempt}/{_MAX_RETRIES})"
+                )
+                time.sleep(_RETRY_SLEEP_SEC)
+                continue
+            raise
+
+
+# ---------- 下位API呼び出し（メモ化付き） ----------
+# 同じレスポンスを複数関数で共有するため、ティッカー単位で一度だけ取得する
+
+@lru_cache(maxsize=256)
+def _financials_reported_cached(ticker: str) -> dict:
+    """financials_reported(quarterly) を1ティッカー1回だけ呼び出す。"""
+    client = _client()
+    log.debug(f"[{ticker}] financials_reported 取得")
+    return _call_with_retry(client.financials_reported, symbol=ticker, freq="quarterly")
+
+
+@lru_cache(maxsize=256)
+def _company_profile_cached(ticker: str) -> dict:
+    """company_profile2 を1ティッカー1回だけ呼び出す。"""
+    client = _client()
+    log.debug(f"[{ticker}] company_profile2 取得")
+    try:
+        return _call_with_retry(client.company_profile2, symbol=ticker) or {}
+    except Exception as e:
+        log.warning(f"[{ticker}] company_profile2 取得失敗: {e}")
+        return {}
+
+
+@lru_cache(maxsize=256)
+def _company_earnings_cached(ticker: str, limit: int) -> tuple:
+    """company_earnings を (ticker, limit) 単位でメモ化。lru_cache 用に tuple 化。"""
+    client = _client()
+    log.debug(f"[{ticker}] company_earnings 取得 (limit={limit})")
+    data = _call_with_retry(client.company_earnings, ticker, limit=limit) or []
+    # lru_cache 対象は hashable 必要。dict のまま tuple にまとめる
+    return tuple(data)
+
+
+def clear_caches() -> None:
+    """テスト・再実行用: メモ化キャッシュを全クリア。"""
+    _financials_reported_cached.cache_clear()
+    _company_profile_cached.cache_clear()
+    _company_earnings_cached.cache_clear()
+
+
+# ---------- public API ----------
 def fetch_eps_surprise(ticker: str, limit: int = 8) -> list[EpsRecord]:
     """最新の四半期EPS実績 vs コンセンサスを取得。新しい順で返す。"""
-    client = _client()
-    data = client.company_earnings(ticker, limit=limit)
+    data = _company_earnings_cached(ticker, limit)
     records = []
     for row in data:
         if row.get("actual") is None or row.get("estimate") is None:
@@ -167,8 +238,7 @@ def _find_net_income(report: dict) -> Optional[float]:
 
 def fetch_quarterly_revenue(ticker: str, quarters: int = 12) -> list[RevenueRecord]:
     """四半期売上のヒストリカルを新しい順→古い順に並べ替えて返す。"""
-    client = _client()
-    data = client.financials_reported(symbol=ticker, freq="quarterly")
+    data = _financials_reported_cached(ticker)
     reports = data.get("data", [])
 
     records = []
@@ -198,7 +268,10 @@ def fetch_earnings_calendar(from_date: str, to_date: str) -> list[CalendarEntry]
     """Finnhub earnings calendar を取得して CalendarEntry のリストで返す。
     日付は ISO形式 'YYYY-MM-DD'。"""
     client = _client()
-    data = client.earnings_calendar(_from=from_date, to=to_date, symbol="", international=False)
+    data = _call_with_retry(
+        client.earnings_calendar,
+        _from=from_date, to=to_date, symbol="", international=False,
+    )
     raw = data.get("earningsCalendar", []) or []
     out = []
     for e in raw:
@@ -224,7 +297,8 @@ def fetch_previous_quarter_actuals(ticker: str, lookback_days: int = 120) -> Opt
     client = _client()
     today = date.today()
     start = today - timedelta(days=lookback_days)
-    data = client.earnings_calendar(
+    data = _call_with_retry(
+        client.earnings_calendar,
         _from=start.isoformat(), to=today.isoformat(),
         symbol=ticker, international=False,
     )
@@ -252,29 +326,20 @@ def fetch_previous_quarter_actuals(ticker: str, lookback_days: int = 120) -> Opt
 
 def fetch_market_cap(ticker: str) -> Optional[float]:
     """時価総額（ドル単位）。Finnhub の marketCapitalization は百万ドル単位。"""
-    client = _client()
-    try:
-        profile = client.company_profile2(symbol=ticker)
-        mc = profile.get("marketCapitalization")
-        return float(mc) * 1e6 if mc else None
-    except Exception:
-        return None
+    profile = _company_profile_cached(ticker)
+    mc = profile.get("marketCapitalization")
+    return float(mc) * 1e6 if mc else None
 
 
 def fetch_company_name(ticker: str) -> Optional[str]:
     """会社名（英語）を取得"""
-    client = _client()
-    try:
-        profile = client.company_profile2(symbol=ticker)
-        return profile.get("name") or None
-    except Exception:
-        return None
+    profile = _company_profile_cached(ticker)
+    return profile.get("name") or None
 
 
 def fetch_margin_history(ticker: str, quarters: int = 8) -> list[MarginRecord]:
     """四半期ごとの売上・営業利益・純利益を取得（利益率計算用）。"""
-    client = _client()
-    data = client.financials_reported(symbol=ticker, freq="quarterly")
+    data = _financials_reported_cached(ticker)
     reports = data.get("data", [])
 
     records = []

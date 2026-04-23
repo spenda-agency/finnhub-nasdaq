@@ -1,6 +1,11 @@
-"""yfinance 経由の市場データ取得（株価・アナリスト推奨・目標株価・決算反応）"""
+"""yfinance 経由の市場データ取得（株価・アナリスト推奨・目標株価・決算反応）
+
+プロセス内メモ化あり: 同一ティッカーへの `fetch_market_snapshot` / `fetch_previous_quarter_revenue`
+は初回のみ yfinance を叩き、2回目以降は結果を使い回す。
+"""
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import lru_cache
 from typing import Optional
 
 import yfinance as yf
@@ -45,6 +50,13 @@ class MarketSnapshot:
         return None
 
 
+def clear_caches() -> None:
+    """テスト・再実行用: yfinance 側メモ化キャッシュを全クリア。"""
+    fetch_previous_quarter_revenue.cache_clear()
+    fetch_market_snapshot.cache_clear()
+
+
+@lru_cache(maxsize=256)
 def fetch_previous_quarter_revenue(ticker: str) -> Optional[float]:
     """yfinance から前期(直近発表済み四半期)の売上を取得（ドル）"""
     try:
@@ -64,6 +76,7 @@ def fetch_previous_quarter_revenue(ticker: str) -> Optional[float]:
         return None
 
 
+@lru_cache(maxsize=256)
 def fetch_market_snapshot(ticker: str) -> MarketSnapshot:
     """yfinance から市場データ一式を取得。失敗した項目は None のまま残す。"""
     snap = MarketSnapshot(ticker=ticker)
