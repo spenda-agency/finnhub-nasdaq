@@ -94,14 +94,16 @@ Finnhub `/calendar/earnings` から、`Revenue Consensus > $10B` かつ未発表
 🇺🇸 CRM    | EPS予想 $2.10 | Rev予想  $9.7B (前期 $9.3B)  | MCap $260B  | FY25Q4 02-26 amc
 ```
 
-### セクション2: 直近24時間の決算 → Part 1 / Part 2 + X下書き + コラム記事 自動生成
+### セクション2: 直近24時間の決算 → Part 1 / Part 2 + 集約X下書き + 集約WP記事
 前営業日 amc 〜 当日 bmo に発表された `Revenue Actual > $10B` の銘柄について：
 1. **Part 1 / Part 2** 画像を Slack スレッドに投稿
-2. **X投稿文 (個別140字以内)** を Claude API で生成 → WordPress に下書き保存（画像添付）
-3. **コラム記事 (2,000字前後)** を Claude API で生成 → Slack スレッドに長文投稿
-4. **X投稿 集約版 (全銘柄1本 / 140字以内)** を Claude API で生成
-   → `drafts/YYYY-MM-DD.txt` に保存してリポジトリに自動コミット
-   → Slack スレッドにも本文投稿（手動でXにコピペ用）
+2. **まとめコラム記事 (全銘柄1本 / 2,000字以上)** を Claude API で生成 → Slack スレッドに長文投稿
+3. **X投稿 集約版 (全銘柄1本 / 140字以内)** を Claude API で生成
+   - `drafts/YYYY-MM-DD.txt` に保存してリポジトリに自動コミット（手動Xコピペ用）
+   - Slack スレッドにも本文投稿
+4. **WordPress下書き (1日1記事 / 全銘柄集約)** を WP に保存
+   - 本文 = コラム記事 + 集約X下書き + 銘柄別チャート画像
+   - 銘柄ごとに別記事は作らない（1日＝1下書き）
 
 ### 手動実行
 ```powershell

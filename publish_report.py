@@ -1,20 +1,15 @@
-"""決算発表された銘柄の X投稿下書き(WordPress) + コラム記事(Slack) を生成・配信
+"""決算発表された銘柄の X投稿下書き(WordPress + drafts/) + コラム記事(Slack) を生成・配信
 
-publish_for_ticker() が単一銘柄の処理をまとめる。morning_report.py から呼ばれる。
+WP・X下書き・コラム記事は全て1日1本に集約する（銘柄ごとには作らない）。
+morning_report.py から publish_combined_article() が呼ばれる。
 """
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
-from pathlib import Path
-
-from claude_writer import (
-    generate_aggregated_x_post,
-    generate_column,
-    generate_combined_column,
-    generate_x_post,
-)
+from claude_writer import generate_aggregated_x_post, generate_combined_column
 from finnhub_client import (
     EpsRecord,
     MarginRecord,
@@ -115,99 +110,6 @@ def _build_facts(
     }
 
 
-# ---------- メイン処理 ----------
-def publish_for_ticker(
-    ticker: str,
-    company_jp: str,
-    fy_label: str,
-    report_date: str,
-    parent_thread_ts: str = "",
-) -> None:
-    """銘柄1つに対して: X card画像 + X投稿文 + コラム記事 → WP+Slack配信"""
-    log.info(f"[{ticker}] publish_for_ticker 開始")
-
-    # データ取得
-    eps = fetch_eps_surprise(ticker, limit=8)
-    revenue = fetch_quarterly_revenue(ticker, quarters=12)
-    margins = fetch_margin_history(ticker, quarters=8)
-    snapshot = fetch_market_snapshot(ticker)
-
-    if not eps or not revenue:
-        log.warning(f"[{ticker}] データ不足のためスキップ")
-        return
-
-    facts = _build_facts(ticker, company_jp, fy_label, report_date, eps, revenue, margins, snapshot)
-
-    # X card 画像
-    log.info(f"[{ticker}] X card 画像生成中...")
-    xcard_path = build_x_card(ticker, company_jp, fy_label, eps[0], revenue, snapshot)
-    log.info(f"  {xcard_path}")
-
-    # X投稿文生成
-    log.info(f"[{ticker}] X投稿文生成中 (Claude)...")
-    try:
-        x_text = generate_x_post(facts)
-        log.info(f"  {len(x_text)}字: {x_text[:50]}...")
-    except Exception as e:
-        log.error(f"[{ticker}] X投稿文生成失敗: {e}")
-        x_text = None
-
-    # コラム記事生成
-    log.info(f"[{ticker}] コラム記事生成中 (Claude)...")
-    try:
-        column_md = generate_column(facts)
-        log.info(f"  {len(column_md)}字")
-    except Exception as e:
-        log.error(f"[{ticker}] コラム生成失敗: {e}")
-        column_md = None
-
-    # WordPress 下書き保存（X投稿テキスト + 画像）
-    if x_text:
-        try:
-            log.info(f"[{ticker}] WordPressにメディアをアップロード...")
-            media_id = upload_media(xcard_path, title=f"{company_jp} ({ticker}) {fy_label}")
-            log.info(f"  media_id: {media_id}")
-            # 本文は X投稿文 + 画像ショートコード（下書きから編集可）
-            content = (
-                f'<!-- wp:paragraph -->\n'
-                f'<p>{x_text.replace(chr(10), "<br>")}</p>\n'
-                f'<!-- /wp:paragraph -->\n'
-                f'<!-- wp:image {{"id":{media_id}}} -->\n'
-                f'<figure class="wp-block-image"><img src="" alt="" class="wp-image-{media_id}"/></figure>\n'
-                f'<!-- /wp:image -->\n'
-            )
-            wp_title = f"【X下書き】{company_jp} ({ticker}) {fy_label}決算"
-            post = create_draft_post(
-                title=wp_title,
-                content=content,
-                featured_media_id=media_id,
-                excerpt=x_text[:100],
-            )
-            log.info(f"  下書き作成: {post.get('link', post.get('id'))}")
-            if parent_thread_ts:
-                post_text_to_slack(
-                    f":memo: {ticker}: WP下書き保存完了 → {post.get('link', '')} ({len(x_text)}字)",
-                    thread_ts=parent_thread_ts,
-                )
-        except Exception as e:
-            log.exception(f"[{ticker}] WP下書き保存失敗: {e}")
-            if parent_thread_ts:
-                post_text_to_slack(f":warning: {ticker}: WP下書き保存失敗 `{e}`", thread_ts=parent_thread_ts)
-
-    # コラム記事を Slack に投稿
-    if column_md:
-        try:
-            # Slack の1メッセージ上限 40,000字以内 (通常 2000字前後なので余裕)
-            header = f":newspaper: *{company_jp} ({ticker}) {fy_label} コラム記事*"
-            ts = post_text_to_slack(header, thread_ts=parent_thread_ts)
-            # 本文はスレッド内の続投稿
-            post_text_to_slack(column_md, thread_ts=ts or parent_thread_ts)
-        except Exception as e:
-            log.exception(f"[{ticker}] コラムSlack投稿失敗: {e}")
-
-    log.info(f"[{ticker}] publish 完了")
-
-
 # ---------- 全銘柄まとめ記事の生成・配信 ----------
 def publish_combined_article(
     ticker_data_list: list[dict],
@@ -221,10 +123,10 @@ def publish_combined_article(
     """
     log.info(f"まとめ記事生成開始: {len(ticker_data_list)}銘柄")
 
-    # 各銘柄のデータを取得して facts リストを構築
+    # 各銘柄のデータを取得して facts リストとチャート画像のみ収集
+    # （個別のX投稿文は生成しない：集約版1本に統一）
     all_facts: list[dict] = []
     all_xcard_paths: list[tuple] = []  # (path, ticker, company_jp)
-    all_x_texts: list[str] = []
 
     for td in ticker_data_list:
         ticker = td["ticker"]
@@ -249,7 +151,7 @@ def publish_combined_article(
         facts = _build_facts(ticker, company_jp, fy_label, entry_date, eps, revenue, margins, snapshot)
         all_facts.append(facts)
 
-        # X card 画像 (個別)
+        # X card 画像 (WP本文内のチャート一覧に使用)
         try:
             xcard_path = build_x_card(ticker, company_jp, fy_label, eps[0], revenue, snapshot)
             all_xcard_paths.append((xcard_path, ticker, company_jp))
@@ -257,19 +159,12 @@ def publish_combined_article(
         except Exception as e:
             log.error(f"[{ticker}] X card 生成失敗: {e}")
 
-        # X投稿文 (個別)
-        try:
-            x_text = generate_x_post(facts)
-            all_x_texts.append(x_text)
-            log.info(f"  X投稿文: {len(x_text)}字")
-        except Exception as e:
-            log.error(f"[{ticker}] X投稿文生成失敗: {e}")
-
     if not all_facts:
         log.warning("有効な銘柄データなし。まとめ記事生成をスキップ")
         return
 
     # 集約版 X投稿文（全銘柄を1ポストに集約・140字以内）を生成して drafts/ に保存
+    aggregated_x: Optional[str] = None
     try:
         log.info("集約X投稿文 (140字) 生成中 (Claude)...")
         aggregated_x = generate_aggregated_x_post(all_facts, report_date)
@@ -292,10 +187,11 @@ def publish_combined_article(
         if parent_thread_ts:
             post_text_to_slack(f":warning: 集約X投稿文の生成失敗: `{e}`", thread_ts=parent_thread_ts)
 
-    # WordPress: 個別 X card + X投稿文を1つの下書きにまとめる
-    wp_title = f"{report_date} Nasdaq決算直後結果と決算直前の詳細"
+    # WordPress: 1日分の内容を集約した1記事 (コラム + 集約X下書き + チャート一覧)
+    tickers_str = ", ".join(f['ticker'] for f in all_facts)
+    wp_title = f"{report_date} Nasdaq決算速報まとめ（{tickers_str}）"
     try:
-        # まとめコラム記事生成 (Claude)
+        # まとめコラム記事生成 (Claude) — 全銘柄を1本のコラムに集約
         log.info("まとめコラム記事生成中 (Claude)...")
         column_md = generate_combined_column(all_facts, upcoming_entries=upcoming_entries)
         log.info(f"  まとめコラム: {len(column_md)}字")
@@ -317,10 +213,10 @@ def publish_combined_article(
                     thread_ts=parent_thread_ts,
                 )
             raise
-        log.info("WordPressにまとめ記事を下書き保存中...")
+        log.info("WordPressにまとめ記事（集約版）を下書き保存中...")
         content_blocks = []
 
-        # コラム本文
+        # 1. コラム本文（全銘柄を集約した1本）
         if column_md:
             # Markdown → HTML 簡易変換 (WP は Gutenberg なのでそのまま paragraph ブロック)
             content_blocks.append(
@@ -329,22 +225,33 @@ def publish_combined_article(
                 f'<!-- /wp:paragraph -->\n'
             )
 
-        # 各銘柄の X card 画像 + X投稿文
-        for i, (xcard_path, ticker, company_jp) in enumerate(all_xcard_paths):
-            media_id = upload_media(xcard_path, title=f"{company_jp} ({ticker})")
+        # 2. 本日のX投稿（140字集約版） — aggregated_x は上で生成済みの場合のみ
+        if aggregated_x:
             content_blocks.append(
                 f'<!-- wp:heading -->\n'
-                f'<h2>{company_jp} ({ticker}) X投稿用</h2>\n'
+                f'<h2>本日のX投稿（140字集約版）</h2>\n'
                 f'<!-- /wp:heading -->\n'
-                f'<!-- wp:image {{"id":{media_id}}} -->\n'
-                f'<figure class="wp-block-image"><img src="" alt="" class="wp-image-{media_id}"/></figure>\n'
-                f'<!-- /wp:image -->\n'
+                f'<!-- wp:paragraph -->\n'
+                f'<p>{aggregated_x.replace(chr(10), "<br>")}</p>\n'
+                f'<!-- /wp:paragraph -->\n'
             )
-            if i < len(all_x_texts):
+
+        # 3. 各銘柄のチャート一覧（画像のみ、個別の見出しや個別X投稿文は付けない）
+        if all_xcard_paths:
+            content_blocks.append(
+                f'<!-- wp:heading -->\n'
+                f'<h2>銘柄別チャート</h2>\n'
+                f'<!-- /wp:heading -->\n'
+            )
+            for xcard_path, ticker, company_jp in all_xcard_paths:
+                media_id = upload_media(xcard_path, title=f"{company_jp} ({ticker})")
                 content_blocks.append(
-                    f'<!-- wp:paragraph -->\n'
-                    f'<p>{all_x_texts[i].replace(chr(10), "<br>")}</p>\n'
-                    f'<!-- /wp:paragraph -->\n'
+                    f'<!-- wp:image {{"id":{media_id}}} -->\n'
+                    f'<figure class="wp-block-image">'
+                    f'<img src="" alt="{company_jp} ({ticker})" class="wp-image-{media_id}"/>'
+                    f'<figcaption>{company_jp} (${ticker})</figcaption>'
+                    f'</figure>\n'
+                    f'<!-- /wp:image -->\n'
                 )
 
         featured_media = None
@@ -356,12 +263,12 @@ def publish_combined_article(
             title=wp_title,
             content="\n".join(content_blocks),
             featured_media_id=featured_media,
-            excerpt=f"Nasdaq主要銘柄の決算速報まとめ（{', '.join(f['ticker'] for f in all_facts)}）",
+            excerpt=f"Nasdaq主要銘柄の決算速報を1本にまとめたレポート（{tickers_str}）",
         )
         log.info(f"  まとめ下書き作成: {post.get('link', post.get('id'))}")
         if parent_thread_ts:
             post_text_to_slack(
-                f":newspaper: まとめ記事WP下書き保存完了 → {post.get('link', '')}",
+                f":newspaper: まとめ記事WP下書き保存完了（1日分集約 / {len(all_facts)}銘柄） → {post.get('link', '')}",
                 thread_ts=parent_thread_ts,
             )
     except Exception as e:
