@@ -2,9 +2,13 @@ name: Morning Earnings Report
 
 on:
   schedule:
-    # JST 火-土 7:00 = UTC 月-金 23:00 (JST = UTC+9)
+    # JST 火-土 7:00 = UTC 月-金 22:00 (JST = UTC+9)
     - cron: '0 22 * * 1-5'
   workflow_dispatch:  # 手動トリガーを許可
+
+# drafts/ を自動コミットするために contents:write が必要
+permissions:
+  contents: write
 
 # Node.js 20 deprecation warning を回避するため Node.js 24 に opt-in
 # （2026年6月以降は GitHub 側で自動切替される）
@@ -19,6 +23,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # drafts/ を後段でコミット/push するため token を保持
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -50,6 +58,25 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python morning_report.py
 
+      - name: Commit and push X drafts
+        # morning_report.py が失敗しても、生成済み drafts/ はコミットしておく
+        if: always()
+        run: |
+          if [ ! -d drafts ] || [ -z "$(ls -A drafts 2>/dev/null)" ]; then
+            echo "drafts/ が空または存在しないためコミットをスキップ"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add drafts/
+          if git diff --cached --quiet; then
+            echo "drafts/ に差分なし"
+            exit 0
+          fi
+          git commit -m "chore(drafts): add X post draft $(date -u +%Y-%m-%d)"
+          # schedule/workflow_dispatch どちらでも push 可能
+          git push origin HEAD:${{ github.ref_name }}
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -57,3 +84,13 @@ jobs:
           name: morning-report-logs-${{ github.run_id }}
           path: logs/
           retention-days: 7
+
+      - name: Upload drafts as artifact
+        # コミット失敗時の保険として artifact でも保持
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x-drafts-${{ github.run_id }}
+          path: drafts/
+          retention-days: 30
+          if-no-files-found: ignore

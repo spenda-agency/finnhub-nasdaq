@@ -67,6 +67,56 @@ EPS実績: {facts['eps_actual_str']}（予想 {facts['eps_estimate_str']}）
 
 
 # -----------------------------------------------------------------
+# 集約版 X投稿文（全銘柄を1ポストにまとめる）
+# -----------------------------------------------------------------
+X_AGGREGATED_SYSTEM = """あなたは米国決算速報を1日1本のXポストにまとめるアナリストです。
+複数銘柄の決算結果を、**140字以内**の日本語ツイート1本に集約します。
+
+必須ルール:
+- 140字以内（改行も字数にカウント。厳守）
+- 対象の全ティッカーに `$` を付けて列挙（例: $GOOG $MSFT $NVDA）
+- Beat/Miss / YoY / 株価反応の要点を最小限のキーワードで
+- 絵文字は合計2〜4個まで
+- 断定・推奨はしない（事実ベース）
+- 末尾に `#米国株 #決算` を必ず含める
+- 文字数オーバーは絶対NG。削る優先順位: 絵文字 → 詳細数値 → ティッカーYoYなど"""
+
+
+def generate_aggregated_x_post(facts_list: list[dict], report_date: str) -> str:
+    """複数銘柄の facts を1つの140字以内ツイートに集約する。"""
+    lines = []
+    for f in facts_list:
+        lines.append(
+            f"- ${f['ticker']} {f['company']}: "
+            f"売上 {f['revenue_actual_str']} (YoY {f['yoy_str']}) / "
+            f"EPS {f['eps_actual_str']} (予想 {f['eps_estimate_str']}, サプライズ {f['eps_surprise_str']}) / "
+            f"株価反応 {f['reaction_str']} / 目標 {f['target_mean_str']} (上振れ {f['upside_str']})"
+        )
+    data_block = "\n".join(lines)
+
+    user = f"""{report_date} 発表の米国株決算 {len(facts_list)}銘柄を、140字以内の日本語Xポスト1本にまとめてください。
+
+対象銘柄のデータ:
+{data_block}
+
+出力ルール:
+- 140字厳守（改行含む）
+- 全ティッカーに $ を付けて含める
+- 個別の細かい数値は省いてOK。Beat/Miss や YoY のざっくり傾向で可
+- 末尾に `#米国株 #決算` を入れる
+- 出力はツイート本文のみ（前置き・解説・引用符なし）"""
+
+    text = _call(X_AGGREGATED_SYSTEM, user, max_tokens=400, temperature=0.4)
+    # 安全装置: 140字を超えたら末尾を切り詰める（ハッシュタグは残す）
+    if len(text) > 140:
+        tail = " #米国株 #決算"
+        body_limit = 140 - len(tail)
+        stripped = text.replace("#米国株", "").replace("#決算", "").rstrip(" \n　")
+        text = stripped[:body_limit].rstrip() + tail
+    return text
+
+
+# -----------------------------------------------------------------
 # コラム記事生成
 # -----------------------------------------------------------------
 COLUMN_SYSTEM = """あなたは米国株の決算速報コラムを書くアナリストです。

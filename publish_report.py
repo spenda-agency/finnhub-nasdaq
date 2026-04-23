@@ -7,7 +7,14 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from claude_writer import generate_column, generate_combined_column, generate_x_post
+from pathlib import Path
+
+from claude_writer import (
+    generate_aggregated_x_post,
+    generate_column,
+    generate_combined_column,
+    generate_x_post,
+)
 from finnhub_client import (
     EpsRecord,
     MarginRecord,
@@ -17,7 +24,7 @@ from finnhub_client import (
     fetch_quarterly_revenue,
 )
 from slack_poster import post_text_to_slack
-from wordpress_client import create_draft_post, upload_media
+from wordpress_client import create_draft_post, upload_media, verify_credentials
 from x_card_builder import build_x_card
 from yfinance_client import MarketSnapshot, fetch_market_snapshot
 
@@ -262,6 +269,29 @@ def publish_combined_article(
         log.warning("有効な銘柄データなし。まとめ記事生成をスキップ")
         return
 
+    # 集約版 X投稿文（全銘柄を1ポストに集約・140字以内）を生成して drafts/ に保存
+    try:
+        log.info("集約X投稿文 (140字) 生成中 (Claude)...")
+        aggregated_x = generate_aggregated_x_post(all_facts, report_date)
+        log.info(f"  集約X投稿文: {len(aggregated_x)}字")
+        drafts_dir = Path(__file__).parent / "drafts"
+        drafts_dir.mkdir(exist_ok=True)
+        draft_path = drafts_dir / f"{report_date}.txt"
+        draft_path.write_text(aggregated_x + "\n", encoding="utf-8")
+        log.info(f"  X下書き保存: {draft_path}")
+        if parent_thread_ts:
+            tickers_str = ", ".join(f['ticker'] for f in all_facts)
+            post_text_to_slack(
+                f":pencil2: *X下書き* ({len(aggregated_x)}字 / {tickers_str})\n"
+                f"`drafts/{report_date}.txt` に保存（リポジトリにコミットされます）\n"
+                f"```\n{aggregated_x}\n```",
+                thread_ts=parent_thread_ts,
+            )
+    except Exception as e:
+        log.exception(f"集約X投稿文生成失敗: {e}")
+        if parent_thread_ts:
+            post_text_to_slack(f":warning: 集約X投稿文の生成失敗: `{e}`", thread_ts=parent_thread_ts)
+
     # WordPress: 個別 X card + X投稿文を1つの下書きにまとめる
     wp_title = f"{report_date} Nasdaq決算直後結果と決算直前の詳細"
     try:
@@ -275,6 +305,18 @@ def publish_combined_article(
 
     # WordPress 下書き保存
     try:
+        log.info("WP 認証・権限の事前チェック中...")
+        try:
+            verify_credentials()
+        except Exception as cred_err:
+            # 認証・権限エラーはログに詳細を残しつつ Slack にも要点だけ通知
+            log.exception(f"WP 認証/権限エラー: {cred_err}")
+            if parent_thread_ts:
+                post_text_to_slack(
+                    f":warning: WP下書きスキップ（認証/権限エラー）\n```{cred_err}```",
+                    thread_ts=parent_thread_ts,
+                )
+            raise
         log.info("WordPressにまとめ記事を下書き保存中...")
         content_blocks = []
 

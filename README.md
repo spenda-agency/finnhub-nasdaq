@@ -97,8 +97,11 @@ Finnhub `/calendar/earnings` から、`Revenue Consensus > $10B` かつ未発表
 ### セクション2: 直近24時間の決算 → Part 1 / Part 2 + X下書き + コラム記事 自動生成
 前営業日 amc 〜 当日 bmo に発表された `Revenue Actual > $10B` の銘柄について：
 1. **Part 1 / Part 2** 画像を Slack スレッドに投稿
-2. **X投稿文 (140字以内)** を Claude API で生成 → WordPress に下書き保存（画像添付）
+2. **X投稿文 (個別140字以内)** を Claude API で生成 → WordPress に下書き保存（画像添付）
 3. **コラム記事 (2,000字前後)** を Claude API で生成 → Slack スレッドに長文投稿
+4. **X投稿 集約版 (全銘柄1本 / 140字以内)** を Claude API で生成
+   → `drafts/YYYY-MM-DD.txt` に保存してリポジトリに自動コミット
+   → Slack スレッドにも本文投稿（手動でXにコピペ用）
 
 ### 手動実行
 ```powershell
@@ -205,3 +208,14 @@ TICKERS = {
 - **Slack投稿失敗 (`not_in_channel`)**: Botをチャンネルに `/invite` で招待
 - **Finnhub 429エラー**: レート制限超過。60秒待って再実行
 - **売上が取れない銘柄がある**: 決算報告のラベル違い。`finnhub_client._find_revenue_in_report` の候補ラベルを調整
+- **Anthropic `credit balance is too low`**: <https://console.anthropic.com/settings/billing> でクレジットを追加。コラム記事・X投稿文の生成が全てスキップされるため最優先で対処
+- **WP下書き保存で 401 `rest_cannot_create`**: 「このユーザーとして投稿を編集する権限がありません」というメッセージが出る場合、以下の順に確認:
+  1. `WP_USERNAME` に対応する **WPユーザーの権限グループを「投稿者(Author)」以上**に変更（購読者・寄稿者には `upload_files` / `edit_posts` がない）
+  2. **アプリケーションパスワードは当該ユーザーで発行したもの**か再確認（別ユーザーのApp Passwordだと本エラー）
+  3. **Wordfence / iThemes Security / All-In-One WP Security** などが REST API を制限していないか。「REST API を有効化」または本スクリプトのIPを許可リストに追加
+  4. サーバー(Apache)が `Authorization` ヘッダを落としている場合は `.htaccess` に以下を追加:
+     ```apache
+     SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+     ```
+  - `publish_report.py` は下書き保存の前に `verify_credentials()` を呼び、上記エラーが起きた場合は Slack に通知した上で下書きをスキップします（ジョブ自体は緑のまま続行）
+- **`drafts/YYYY-MM-DD.txt` がリポジトリにコミットされない**: Actions → workflow permissions が `Read and write permissions` になっているか確認（Settings → Actions → General → Workflow permissions）
