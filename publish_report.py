@@ -9,7 +9,11 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from claude_writer import generate_aggregated_x_post, generate_combined_column
+from claude_writer import (
+    generate_aggregated_x_post,
+    generate_combined_column,
+    generate_wp_blog_article,
+)
 from finnhub_client import (
     EpsRecord,
     MarginRecord,
@@ -187,17 +191,33 @@ def publish_combined_article(
         if parent_thread_ts:
             post_text_to_slack(f":warning: 集約X投稿文の生成失敗: `{e}`", thread_ts=parent_thread_ts)
 
-    # WordPress: 1日分の内容を集約した1記事 (コラム + 集約X下書き + チャート一覧)
+    # WordPress: 1日分の内容を集約した1記事 (HTML/Title+MetaDescription+Body 形式)
     tickers_str = ", ".join(f['ticker'] for f in all_facts)
-    wp_title = f"{report_date} Nasdaq決算速報まとめ（{tickers_str}）"
+    fallback_title = f"{report_date} Nasdaq決算速報まとめ（{tickers_str}）"
+
+    # Slack 用のコラム記事(従来の Markdown 形式) と
+    # WP 用のブログ記事(HTML 形式・Title/Meta/Body) を別々に生成
+    column_md: Optional[str] = None
     try:
-        # まとめコラム記事生成 (Claude) — 全銘柄を1本のコラムに集約
-        log.info("まとめコラム記事生成中 (Claude)...")
+        log.info("Slack用コラム記事生成中 (Claude)...")
         column_md = generate_combined_column(all_facts, upcoming_entries=upcoming_entries)
-        log.info(f"  まとめコラム: {len(column_md)}字")
+        log.info(f"  Slack用コラム: {len(column_md)}字")
     except Exception as e:
-        log.exception(f"まとめコラム生成失敗: {e}")
-        column_md = None
+        log.exception(f"Slack用コラム生成失敗: {e}")
+
+    wp_blog: Optional[dict] = None
+    try:
+        log.info("WP用ブログ記事生成中 (Claude / HTML出力)...")
+        wp_blog = generate_wp_blog_article(
+            all_facts, report_date, upcoming_entries=upcoming_entries
+        )
+        log.info(
+            f"  WPブログ: title={len(wp_blog.get('title', ''))}字 / "
+            f"meta={len(wp_blog.get('meta_description', ''))}字 / "
+            f"body={len(wp_blog.get('body_html', ''))}字"
+        )
+    except Exception as e:
+        log.exception(f"WPブログ記事生成失敗: {e}")
 
     # WordPress 下書き保存
     try:
@@ -213,35 +233,41 @@ def publish_combined_article(
                     thread_ts=parent_thread_ts,
                 )
             raise
-        log.info("WordPressにまとめ記事（集約版）を下書き保存中...")
+        log.info("WordPressにまとめ記事（HTML形式）を下書き保存中...")
         content_blocks = []
 
-        # 1. コラム本文（全銘柄を集約した1本）
-        if column_md:
-            # Markdown → HTML 簡易変換 (WP は Gutenberg なのでそのまま paragraph ブロック)
+        # 1. メイン本文 (Claude が生成した HTML をそのまま投入)
+        if wp_blog and wp_blog.get("body_html"):
+            content_blocks.append(
+                '<!-- wp:html -->\n'
+                f'{wp_blog["body_html"]}\n'
+                '<!-- /wp:html -->\n'
+            )
+        elif column_md:
+            # フォールバック: WP用記事生成に失敗した場合は Slack 用 Markdown を流用
             content_blocks.append(
                 f'<!-- wp:paragraph -->\n'
                 f'<p>{column_md.replace(chr(10), "<br>")}</p>\n'
                 f'<!-- /wp:paragraph -->\n'
             )
 
-        # 2. 本日のX投稿（140字集約版） — aggregated_x は上で生成済みの場合のみ
+        # 2. 本日のX投稿（140字集約版）
         if aggregated_x:
             content_blocks.append(
-                f'<!-- wp:heading -->\n'
-                f'<h2>本日のX投稿（140字集約版）</h2>\n'
-                f'<!-- /wp:heading -->\n'
-                f'<!-- wp:paragraph -->\n'
+                '<!-- wp:heading -->\n'
+                '<h2>本日のX投稿（140字集約版）</h2>\n'
+                '<!-- /wp:heading -->\n'
+                '<!-- wp:paragraph -->\n'
                 f'<p>{aggregated_x.replace(chr(10), "<br>")}</p>\n'
-                f'<!-- /wp:paragraph -->\n'
+                '<!-- /wp:paragraph -->\n'
             )
 
-        # 3. 各銘柄のチャート一覧（画像のみ、個別の見出しや個別X投稿文は付けない）
+        # 3. 各銘柄のチャート一覧
         if all_xcard_paths:
             content_blocks.append(
-                f'<!-- wp:heading -->\n'
-                f'<h2>銘柄別チャート</h2>\n'
-                f'<!-- /wp:heading -->\n'
+                '<!-- wp:heading -->\n'
+                '<h2>銘柄別チャート</h2>\n'
+                '<!-- /wp:heading -->\n'
             )
             for xcard_path, ticker, company_jp in all_xcard_paths:
                 media_id = upload_media(xcard_path, title=f"{company_jp} ({ticker})")
@@ -254,21 +280,28 @@ def publish_combined_article(
                     f'<!-- /wp:image -->\n'
                 )
 
+        # WP タイトル / アイキャッチ / 抜粋
+        wp_title = (wp_blog.get("title") if wp_blog else "") or fallback_title
+        wp_excerpt = (
+            (wp_blog.get("meta_description") if wp_blog else "")
+            or f"Nasdaq主要銘柄の決算速報を1本にまとめたレポート（{tickers_str}）"
+        )
         featured_media = None
         if all_xcard_paths:
-            # 最初の X card をアイキャッチに
             featured_media = upload_media(all_xcard_paths[0][0], title=wp_title)
 
         post = create_draft_post(
             title=wp_title,
             content="\n".join(content_blocks),
             featured_media_id=featured_media,
-            excerpt=f"Nasdaq主要銘柄の決算速報を1本にまとめたレポート（{tickers_str}）",
+            excerpt=wp_excerpt,
         )
         log.info(f"  まとめ下書き作成: {post.get('link', post.get('id'))}")
         if parent_thread_ts:
             post_text_to_slack(
-                f":newspaper: まとめ記事WP下書き保存完了（1日分集約 / {len(all_facts)}銘柄） → {post.get('link', '')}",
+                f":newspaper: WP下書き保存完了（1日分集約 / {len(all_facts)}銘柄）\n"
+                f"タイトル: `{wp_title}`\n"
+                f"→ {post.get('link', '')}",
                 thread_ts=parent_thread_ts,
             )
     except Exception as e:
