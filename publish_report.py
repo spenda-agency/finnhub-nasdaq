@@ -204,6 +204,11 @@ def publish_combined_article(
         log.info(f"  Slack用コラム: {len(column_md)}字")
     except Exception as e:
         log.exception(f"Slack用コラム生成失敗: {e}")
+        if parent_thread_ts:
+            post_text_to_slack(
+                f":warning: Slackコラム生成失敗: `{e}`",
+                thread_ts=parent_thread_ts,
+            )
 
     wp_blog: Optional[dict] = None
     try:
@@ -218,96 +223,104 @@ def publish_combined_article(
         )
     except Exception as e:
         log.exception(f"WPブログ記事生成失敗: {e}")
+        if parent_thread_ts:
+            post_text_to_slack(
+                f":warning: WPブログ本文生成失敗: `{e}`",
+                thread_ts=parent_thread_ts,
+            )
 
     # WordPress 下書き保存
-    try:
-        log.info("WP 認証・権限の事前チェック中...")
+    # WP本文HTMLが生成できなかった場合は下書き作成自体をスキップする
+    # (空のWP下書きを量産しないため。本文は Slack のコラム投稿で参照する)
+    if not (wp_blog and wp_blog.get("body_html")):
+        log.warning("WP本文HTMLが空のため WP下書き作成をスキップ")
+        if parent_thread_ts:
+            post_text_to_slack(
+                ":warning: WP下書きスキップ（本文未生成のため）\n"
+                "本文は Slack のコラム投稿を参照してください。",
+                thread_ts=parent_thread_ts,
+            )
+    else:
         try:
-            verify_credentials()
-        except Exception as cred_err:
-            # 認証・権限エラーはログに詳細を残しつつ Slack にも要点だけ通知
-            log.exception(f"WP 認証/権限エラー: {cred_err}")
-            if parent_thread_ts:
-                post_text_to_slack(
-                    f":warning: WP下書きスキップ（認証/権限エラー）\n```{cred_err}```",
-                    thread_ts=parent_thread_ts,
-                )
-            raise
-        log.info("WordPressにまとめ記事（HTML形式）を下書き保存中...")
-        content_blocks = []
+            log.info("WP 認証・権限の事前チェック中...")
+            try:
+                verify_credentials()
+            except Exception as cred_err:
+                # 認証・権限エラーはログに詳細を残しつつ Slack にも要点だけ通知
+                log.exception(f"WP 認証/権限エラー: {cred_err}")
+                if parent_thread_ts:
+                    post_text_to_slack(
+                        f":warning: WP下書きスキップ（認証/権限エラー）\n```{cred_err}```",
+                        thread_ts=parent_thread_ts,
+                    )
+                raise
+            log.info("WordPressにまとめ記事（HTML形式）を下書き保存中...")
+            content_blocks = []
 
-        # 1. メイン本文 (Claude が生成した HTML をそのまま投入)
-        if wp_blog and wp_blog.get("body_html"):
+            # 1. メイン本文 (Claude が生成した HTML をそのまま投入)
             content_blocks.append(
                 '<!-- wp:html -->\n'
                 f'{wp_blog["body_html"]}\n'
                 '<!-- /wp:html -->\n'
             )
-        elif column_md:
-            # フォールバック: WP用記事生成に失敗した場合は Slack 用 Markdown を流用
-            content_blocks.append(
-                f'<!-- wp:paragraph -->\n'
-                f'<p>{column_md.replace(chr(10), "<br>")}</p>\n'
-                f'<!-- /wp:paragraph -->\n'
-            )
 
-        # 2. 本日のX投稿（140字集約版）
-        if aggregated_x:
-            content_blocks.append(
-                '<!-- wp:heading -->\n'
-                '<h2>本日のX投稿（140字集約版）</h2>\n'
-                '<!-- /wp:heading -->\n'
-                '<!-- wp:paragraph -->\n'
-                f'<p>{aggregated_x.replace(chr(10), "<br>")}</p>\n'
-                '<!-- /wp:paragraph -->\n'
-            )
-
-        # 3. 各銘柄のチャート一覧
-        if all_xcard_paths:
-            content_blocks.append(
-                '<!-- wp:heading -->\n'
-                '<h2>銘柄別チャート</h2>\n'
-                '<!-- /wp:heading -->\n'
-            )
-            for xcard_path, ticker, company_jp in all_xcard_paths:
-                media_id = upload_media(xcard_path, title=f"{company_jp} ({ticker})")
+            # 2. 本日のX投稿（140字集約版）
+            if aggregated_x:
                 content_blocks.append(
-                    f'<!-- wp:image {{"id":{media_id}}} -->\n'
-                    f'<figure class="wp-block-image">'
-                    f'<img src="" alt="{company_jp} ({ticker})" class="wp-image-{media_id}"/>'
-                    f'<figcaption>{company_jp} (${ticker})</figcaption>'
-                    f'</figure>\n'
-                    f'<!-- /wp:image -->\n'
+                    '<!-- wp:heading -->\n'
+                    '<h2>本日のX投稿（140字集約版）</h2>\n'
+                    '<!-- /wp:heading -->\n'
+                    '<!-- wp:paragraph -->\n'
+                    f'<p>{aggregated_x.replace(chr(10), "<br>")}</p>\n'
+                    '<!-- /wp:paragraph -->\n'
                 )
 
-        # WP タイトル / アイキャッチ / 抜粋
-        wp_title = (wp_blog.get("title") if wp_blog else "") or fallback_title
-        wp_excerpt = (
-            (wp_blog.get("meta_description") if wp_blog else "")
-            or f"Nasdaq主要銘柄の決算速報を1本にまとめたレポート（{tickers_str}）"
-        )
-        featured_media = None
-        if all_xcard_paths:
-            featured_media = upload_media(all_xcard_paths[0][0], title=wp_title)
+            # 3. 各銘柄のチャート一覧
+            if all_xcard_paths:
+                content_blocks.append(
+                    '<!-- wp:heading -->\n'
+                    '<h2>銘柄別チャート</h2>\n'
+                    '<!-- /wp:heading -->\n'
+                )
+                for xcard_path, ticker, company_jp in all_xcard_paths:
+                    media_id = upload_media(xcard_path, title=f"{company_jp} ({ticker})")
+                    content_blocks.append(
+                        f'<!-- wp:image {{"id":{media_id}}} -->\n'
+                        f'<figure class="wp-block-image">'
+                        f'<img src="" alt="{company_jp} ({ticker})" class="wp-image-{media_id}"/>'
+                        f'<figcaption>{company_jp} (${ticker})</figcaption>'
+                        f'</figure>\n'
+                        f'<!-- /wp:image -->\n'
+                    )
 
-        post = create_draft_post(
-            title=wp_title,
-            content="\n".join(content_blocks),
-            featured_media_id=featured_media,
-            excerpt=wp_excerpt,
-        )
-        log.info(f"  まとめ下書き作成: {post.get('link', post.get('id'))}")
-        if parent_thread_ts:
-            post_text_to_slack(
-                f":newspaper: WP下書き保存完了（1日分集約 / {len(all_facts)}銘柄）\n"
-                f"タイトル: `{wp_title}`\n"
-                f"→ {post.get('link', '')}",
-                thread_ts=parent_thread_ts,
+            # WP タイトル / アイキャッチ / 抜粋
+            wp_title = wp_blog.get("title") or fallback_title
+            wp_excerpt = (
+                wp_blog.get("meta_description")
+                or f"Nasdaq主要銘柄の決算速報を1本にまとめたレポート（{tickers_str}）"
             )
-    except Exception as e:
-        log.exception(f"WPまとめ下書き保存失敗: {e}")
-        if parent_thread_ts:
-            post_text_to_slack(f":warning: まとめ記事WP下書き保存失敗: `{e}`", thread_ts=parent_thread_ts)
+            featured_media = None
+            if all_xcard_paths:
+                featured_media = upload_media(all_xcard_paths[0][0], title=wp_title)
+
+            post = create_draft_post(
+                title=wp_title,
+                content="\n".join(content_blocks),
+                featured_media_id=featured_media,
+                excerpt=wp_excerpt,
+            )
+            log.info(f"  まとめ下書き作成: {post.get('link', post.get('id'))}")
+            if parent_thread_ts:
+                post_text_to_slack(
+                    f":newspaper: WP下書き保存完了（1日分集約 / {len(all_facts)}銘柄）\n"
+                    f"タイトル: `{wp_title}`\n"
+                    f"→ {post.get('link', '')}",
+                    thread_ts=parent_thread_ts,
+                )
+        except Exception as e:
+            log.exception(f"WPまとめ下書き保存失敗: {e}")
+            if parent_thread_ts:
+                post_text_to_slack(f":warning: まとめ記事WP下書き保存失敗: `{e}`", thread_ts=parent_thread_ts)
 
     # Slack にまとめコラム投稿
     if column_md:
@@ -318,5 +331,7 @@ def publish_combined_article(
             post_text_to_slack(column_md, thread_ts=ts or parent_thread_ts)
         except Exception as e:
             log.exception(f"まとめコラムSlack投稿失敗: {e}")
+    else:
+        log.warning("column_md が空のため Slack コラム投稿をスキップ（前段で警告済み）")
 
     log.info("まとめ記事 publish 完了")
