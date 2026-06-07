@@ -22,7 +22,7 @@ from finnhub_client import (
     fetch_margin_history,
     fetch_quarterly_revenue,
 )
-from slack_poster import post_text_to_slack
+from slack_poster import try_post_text
 from wordpress_client import create_draft_post, upload_media, verify_credentials
 from x_card_builder import build_x_card
 from yfinance_client import MarketSnapshot, fetch_market_snapshot
@@ -180,7 +180,7 @@ def publish_combined_article(
         log.info(f"  X下書き保存: {draft_path}")
         if parent_thread_ts:
             tickers_str = ", ".join(f['ticker'] for f in all_facts)
-            post_text_to_slack(
+            try_post_text(
                 f":pencil2: *X下書き* ({len(aggregated_x)}字 / {tickers_str})\n"
                 f"`drafts/{report_date}.txt` に保存（リポジトリにコミットされます）\n"
                 f"```\n{aggregated_x}\n```",
@@ -189,7 +189,7 @@ def publish_combined_article(
     except Exception as e:
         log.exception(f"集約X投稿文生成失敗: {e}")
         if parent_thread_ts:
-            post_text_to_slack(f":warning: 集約X投稿文の生成失敗: `{e}`", thread_ts=parent_thread_ts)
+            try_post_text(f":warning: 集約X投稿文の生成失敗: `{e}`", thread_ts=parent_thread_ts)
 
     # WordPress: 1日分の内容を集約した1記事 (HTML/Title+MetaDescription+Body 形式)
     tickers_str = ", ".join(f['ticker'] for f in all_facts)
@@ -205,7 +205,7 @@ def publish_combined_article(
     except Exception as e:
         log.exception(f"Slack用コラム生成失敗: {e}")
         if parent_thread_ts:
-            post_text_to_slack(
+            try_post_text(
                 f":warning: Slackコラム生成失敗: `{e}`",
                 thread_ts=parent_thread_ts,
             )
@@ -224,7 +224,7 @@ def publish_combined_article(
     except Exception as e:
         log.exception(f"WPブログ記事生成失敗: {e}")
         if parent_thread_ts:
-            post_text_to_slack(
+            try_post_text(
                 f":warning: WPブログ本文生成失敗: `{e}`",
                 thread_ts=parent_thread_ts,
             )
@@ -235,7 +235,7 @@ def publish_combined_article(
     if not (wp_blog and wp_blog.get("body_html")):
         log.warning("WP本文HTMLが空のため WP下書き作成をスキップ")
         if parent_thread_ts:
-            post_text_to_slack(
+            try_post_text(
                 ":warning: WP下書きスキップ（本文未生成のため）\n"
                 "本文は Slack のコラム投稿を参照してください。",
                 thread_ts=parent_thread_ts,
@@ -249,7 +249,7 @@ def publish_combined_article(
                 # 認証・権限エラーはログに詳細を残しつつ Slack にも要点だけ通知
                 log.exception(f"WP 認証/権限エラー: {cred_err}")
                 if parent_thread_ts:
-                    post_text_to_slack(
+                    try_post_text(
                         f":warning: WP下書きスキップ（認証/権限エラー）\n```{cred_err}```",
                         thread_ts=parent_thread_ts,
                     )
@@ -264,18 +264,9 @@ def publish_combined_article(
                 '<!-- /wp:html -->\n'
             )
 
-            # 2. 本日のX投稿（140字集約版）
-            if aggregated_x:
-                content_blocks.append(
-                    '<!-- wp:heading -->\n'
-                    '<h2>本日のX投稿（140字集約版）</h2>\n'
-                    '<!-- /wp:heading -->\n'
-                    '<!-- wp:paragraph -->\n'
-                    f'<p>{aggregated_x.replace(chr(10), "<br>")}</p>\n'
-                    '<!-- /wp:paragraph -->\n'
-                )
-
-            # 3. 各銘柄のチャート一覧
+            # 2. 各銘柄のチャート一覧
+            # （X 集約投稿文は WP 本文に含めない。Slack スレッドと drafts/YYYY-MM-DD.txt
+            #   のみで管理する方針）
             if all_xcard_paths:
                 content_blocks.append(
                     '<!-- wp:heading -->\n'
@@ -311,7 +302,7 @@ def publish_combined_article(
             )
             log.info(f"  まとめ下書き作成: {post.get('link', post.get('id'))}")
             if parent_thread_ts:
-                post_text_to_slack(
+                try_post_text(
                     f":newspaper: WP下書き保存完了（1日分集約 / {len(all_facts)}銘柄）\n"
                     f"タイトル: `{wp_title}`\n"
                     f"→ {post.get('link', '')}",
@@ -320,15 +311,15 @@ def publish_combined_article(
         except Exception as e:
             log.exception(f"WPまとめ下書き保存失敗: {e}")
             if parent_thread_ts:
-                post_text_to_slack(f":warning: まとめ記事WP下書き保存失敗: `{e}`", thread_ts=parent_thread_ts)
+                try_post_text(f":warning: まとめ記事WP下書き保存失敗: `{e}`", thread_ts=parent_thread_ts)
 
     # Slack にまとめコラム投稿
     if column_md:
         try:
             tickers_str = ", ".join(f['ticker'] for f in all_facts)
             header = f":newspaper: *{report_date} Nasdaq決算直後結果と決算直前の詳細* ({tickers_str})"
-            ts = post_text_to_slack(header, thread_ts=parent_thread_ts)
-            post_text_to_slack(column_md, thread_ts=ts or parent_thread_ts)
+            ts = try_post_text(header, thread_ts=parent_thread_ts)
+            try_post_text(column_md, thread_ts=ts or parent_thread_ts)
         except Exception as e:
             log.exception(f"まとめコラムSlack投稿失敗: {e}")
     else:
