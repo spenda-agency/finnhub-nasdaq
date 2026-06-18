@@ -27,7 +27,12 @@ from finnhub_client import (
     fetch_eps_surprise,
     fetch_market_cap,
 )
-from slack_poster import post_text_to_slack
+from slack_poster import (
+    is_slack_enabled,
+    preflight_slack,
+    suppressed_count,
+    try_post_text,
+)
 from main import process_ticker
 from yfinance_client import fetch_previous_quarter_revenue
 
@@ -165,7 +170,7 @@ def run_part1_part2_for(entry: CalendarEntry, parent_thread_ts: str = "") -> Non
     except Exception as e:
         log.error(f"[{ticker}] Part1/Part2 エラー: {e}")
         if parent_thread_ts:
-            post_text_to_slack(f":warning: {ticker} Part1/2 生成失敗: `{e}`", thread_ts=parent_thread_ts)
+            try_post_text(f":warning: {ticker} Part1/2 生成失敗: `{e}`", thread_ts=parent_thread_ts)
 
 
 def _fmt_b_simple(v: float | None) -> str:
@@ -241,24 +246,33 @@ def main() -> int:
     log.info(f"morning_report 開始 ({date.today()})")
     log.info("=" * 60)
 
+    # Slack 到達性プリフライト。失敗しても本業（drafts/ への X 下書き保存、
+    # WP 下書き作成）は継続できるよう、ここでは return しない。
+    # 以降の Slack 呼び出しは全て try_post_text 経由なので、無効化されていれば
+    # 自動的にスキップされる。
+    if not preflight_slack():
+        log.warning(
+            "Slack 到達不可 — Slack 投稿は全てスキップして本業（drafts/ + WP下書き）のみ実行します"
+        )
+
     # Section 1
     try:
         upcoming_msg = build_upcoming_section()
-        post_text_to_slack(upcoming_msg)
+        try_post_text(upcoming_msg)
     except Exception as e:
         log.exception(f"Section 1 エラー: {e}")
-        post_text_to_slack(f":warning: Section1(今後の予定)取得失敗: `{e}`")
+        try_post_text(f":warning: Section1(今後の予定)取得失敗: `{e}`")
 
     # Section 2
     try:
         recent = get_recent_reported_tickers()
     except Exception as e:
         log.exception(f"Section 2 取得エラー: {e}")
-        post_text_to_slack(f":warning: Section2(直近決算)取得失敗: `{e}`")
+        try_post_text(f":warning: Section2(直近決算)取得失敗: `{e}`")
         return 1
 
     if not recent:
-        post_text_to_slack(":bar_chart: *直近24時間の決算 (Revenue > $10B)*\n_該当銘柄なし_")
+        try_post_text(":bar_chart: *直近24時間の決算 (Revenue > $10B)*\n_該当銘柄なし_")
         log.info("該当なし。終了。")
         return 0
 
@@ -267,11 +281,11 @@ def main() -> int:
         f"以下の銘柄について Part 1 / Part 2 を順次投稿します:\n"
         f"`{', '.join(e.symbol for e in recent)}`"
     )
-    parent_ts = post_text_to_slack(summary)
+    parent_ts = try_post_text(summary)
 
     # Part 1 / Part 2 チャート画像は個別に生成・投稿
     for entry in recent:
-        run_part1_part2_for(entry, parent_thread_ts=parent_ts)
+        run_part1_part2_for(entry, parent_thread_ts=parent_ts or "")
 
     # 全銘柄まとめ記事を1本生成 (WP下書き + Slackコラム)
     try:
@@ -292,15 +306,23 @@ def main() -> int:
         publish_combined_article(
             ticker_data_list=ticker_data_list,
             report_date=date.today().isoformat(),
-            parent_thread_ts=parent_ts,
+            parent_thread_ts=parent_ts or "",
             upcoming_entries=upcoming_entries_data,
         )
     except Exception as e:
         log.exception(f"まとめ記事生成失敗: {e}")
         if parent_ts:
-            post_text_to_slack(f":warning: まとめ記事生成失敗: `{e}`", thread_ts=parent_ts)
+            try_post_text(f":warning: まとめ記事生成失敗: `{e}`", thread_ts=parent_ts)
 
-    log.info("morning_report 完了")
+    # 終了サマリ: Slack 投稿が抑制された場合は件数を残す
+    if not is_slack_enabled():
+        log.warning("morning_report 完了（Slack 無効化のため Slack 投稿は全件スキップ）")
+    elif suppressed_count() > 0:
+        log.warning(
+            f"morning_report 完了（Slack 投稿で {suppressed_count()} 件のエラーを抑制）"
+        )
+    else:
+        log.info("morning_report 完了")
     return 0
 
 
