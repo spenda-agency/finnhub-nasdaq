@@ -80,7 +80,9 @@ def _fmt_eps(v: float | None) -> str:
 # ---------- セクション1: 今後の予定 ----------
 def build_upcoming_section() -> str:
     today = date.today()
-    end = today + timedelta(days=3)
+    # Finnhub の `to` パラメータは end-inclusive。ヘッダ「今後3日」に揃えるため
+    # today + 2 = 今日 + 2日後（計3日ぶん）にする
+    end = today + timedelta(days=2)
     log.info(f"今後の決算予定取得: {today} → {end}")
     entries = fetch_earnings_calendar(today.isoformat(), end.isoformat())
 
@@ -192,7 +194,8 @@ def _fmt_eps_simple(v: float | None) -> str:
 def _build_upcoming_data() -> list[dict]:
     """今後3日の決算予定データを、まとめ記事の「決算直前の詳細」セクション用に構築"""
     today = date.today()
-    end = today + timedelta(days=3)
+    # `to` は end-inclusive。build_upcoming_section と窓を揃える
+    end = today + timedelta(days=2)
     try:
         entries = fetch_earnings_calendar(today.isoformat(), end.isoformat())
     except Exception as e:
