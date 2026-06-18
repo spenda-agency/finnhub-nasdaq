@@ -14,6 +14,10 @@ permissions:
 # （2026年6月以降は GitHub 側で自動切替される）
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # cron は UTC 22:00 (= JST 07:00) に発火する。runner のデフォルト TZ は UTC
+  # のため Python の `date.today()` が JST から見て 1 日前を返してしまう。
+  # 全ステップで JST 基準にするためここで TZ を固定する。
+  TZ: Asia/Tokyo
 
 jobs:
   morning-report:
